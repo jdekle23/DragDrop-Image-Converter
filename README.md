@@ -22,19 +22,3 @@ Built with **Tkinter**, **Pillow**, and **tkinterdnd2** for simple desktop use â
    ```bash
    git clone https://github.com/<your-username>/dragdrop-image-converter.git
    cd dragdrop-image-converter
-    ```
-
-## ðŸš€ Merging the latest UI features into `main`
-
-If you sync with GitHub and see merge markers like `<<<<<<<`, `=======`, or `>>>>>>>` inside
-`Drag Drop Image Converter.py`, keep the new upscale/enhancement UI by choosing **Accept Incoming
-Change** (or manually deleting the markers and leaving the new block). Once the file looks clean:
-
-```bash
-python -m compileall "Drag Drop Image Converter.py"  # quick syntax check
-git add "Drag Drop Image Converter.py"
-git commit -m "Resolve merge after enhancement update"
-git push
-```
-
-That sequence resolves the conflict and lets you fast-forward `main` with the enhanced exporter.
