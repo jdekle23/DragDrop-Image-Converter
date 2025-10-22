@@ -15,6 +15,7 @@ Note: On some systems you may need the tkdnd DLL that comes with tkinterdnd2.
 import sys
 import threading
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
@@ -35,7 +36,7 @@ except Exception as e:
 
 # Imaging
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 except Exception as e:
     print("Pillow (PIL) is required. Install with: pip install pillow")
     sys.exit(1)
@@ -44,6 +45,38 @@ except Exception as e:
 SUPPORTED_INPUTS = {".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".heic"}
 # Output choices (JPG is a user-facing alias for Pillow's JPEG encoder)
 OUTPUT_FORMATS = ["JPG", "JPEG", "PNG", "WEBP", "TIFF", "BMP"]
+
+# Upscale choices exposed in the UI. Map label -> scale factor (float multiplier).
+UPSCALE_OPTIONS = {
+    "No Upscale (100%)": 1.0,
+    "125% (1.25×)": 1.25,
+    "150% (1.5×)": 1.5,
+    "200% (2×)": 2.0,
+}
+
+_RESAMPLE_LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
+
+
+@dataclass(frozen=True)
+class EnhancementSettings:
+    autopilot: bool = False
+    adjust_lighting: bool = False
+    balance_color: bool = False
+    sharpen_subject: bool = False
+    preserve_text: bool = False
+    denoise: bool = False
+
+    def any_enabled(self) -> bool:
+        return any(
+            (
+                self.autopilot,
+                self.adjust_lighting,
+                self.balance_color,
+                self.sharpen_subject,
+                self.preserve_text,
+                self.denoise,
+            )
+        )
 
 def is_image_file(p: Path) -> bool:
     return p.suffix.lower() in SUPPORTED_INPUTS and p.is_file()
@@ -76,7 +109,130 @@ def _resolve_output_fmt(fmt: str):
         return ("JPEG", "jpeg", True)
     return (f, f.lower(), False)
 
-def export_image(src: Path, out_dir: Path, fmt: str, quality: int, keep_exif: bool, suffix: str) -> Path:
+def _apply_upscale(im: Image.Image, scale: float) -> Image.Image:
+    """Return an upscaled copy of *im* when scale > 1. Uses high-quality Lanczos."""
+    if scale <= 1.0:
+        return im
+    w, h = im.size
+    new_size = (int(round(w * scale)), int(round(h * scale)))
+    if new_size == im.size:
+        return im
+    return im.resize(new_size, _RESAMPLE_LANCZOS)
+
+
+def _extract_alpha(im: Image.Image):
+    """Return (base_image_without_alpha, alpha_channel_or_None, original_mode)."""
+    original_mode = im.mode
+    alpha = None
+    base = im
+    if im.mode in ("RGBA", "LA"):
+        alpha = im.getchannel("A")
+        base = im.convert("RGB" if im.mode == "RGBA" else "L")
+    elif im.mode == "P":
+        # Palettes can include transparency; promote to RGB for processing.
+        rgba = im.convert("RGBA")
+        if "transparency" in im.info:
+            alpha = rgba.getchannel("A")
+        base = rgba.convert("RGB")
+    elif im.mode not in ("RGB", "L"):
+        base = im.convert("RGB")
+    return base, alpha, original_mode
+
+
+def _recombine_alpha(base: Image.Image, alpha, original_mode: str) -> Image.Image:
+    if alpha is None:
+        if original_mode == "L" and base.mode != "L":
+            return base.convert("L")
+        return base
+    if original_mode == "LA":
+        l = base.convert("L")
+        return Image.merge("LA", (l, alpha))
+    rgb = base.convert("RGB")
+    rgba = rgb.copy()
+    rgba.putalpha(alpha)
+    return rgba
+
+
+def _enhance_autopilot(im: Image.Image) -> Image.Image:
+    work = im
+    work = ImageOps.autocontrast(work, cutoff=1)
+    if work.mode == "RGB":
+        work = ImageEnhance.Color(work).enhance(1.08)
+    work = ImageEnhance.Sharpness(work).enhance(1.12)
+    work = ImageEnhance.Contrast(work).enhance(1.05)
+    return work
+
+
+def _enhance_adjust_lighting(im: Image.Image) -> Image.Image:
+    work = ImageOps.autocontrast(im, cutoff=1)
+    if work.mode == "RGB":
+        work = ImageEnhance.Brightness(work).enhance(1.05)
+    return work
+
+
+def _enhance_balance_color(im: Image.Image) -> Image.Image:
+    if im.mode != "RGB":
+        return ImageOps.autocontrast(im, cutoff=1)
+    r, g, b = im.split()
+    r = ImageOps.autocontrast(r, cutoff=1)
+    g = ImageOps.autocontrast(g, cutoff=1)
+    b = ImageOps.autocontrast(b, cutoff=1)
+    merged = Image.merge("RGB", (r, g, b))
+    return ImageEnhance.Color(merged).enhance(1.06)
+
+
+def _enhance_sharpen(im: Image.Image) -> Image.Image:
+    return ImageEnhance.Sharpness(im).enhance(1.6)
+
+
+def _enhance_preserve_text(im: Image.Image) -> Image.Image:
+    work = ImageEnhance.Contrast(im).enhance(1.35)
+    work = ImageEnhance.Brightness(work).enhance(1.08)
+    return work.filter(ImageFilter.UnsharpMask(radius=1.2, percent=140, threshold=4))
+
+
+def _enhance_denoise(im: Image.Image) -> Image.Image:
+    return im.filter(ImageFilter.MedianFilter(size=3))
+
+
+def apply_enhancements(im: Image.Image, settings: EnhancementSettings) -> Image.Image:
+    if not settings or not settings.any_enabled():
+        return im
+
+    base, alpha, original_mode = _extract_alpha(im)
+    work = base
+
+    if settings.autopilot:
+        work = _enhance_autopilot(work)
+
+    if settings.adjust_lighting:
+        work = _enhance_adjust_lighting(work)
+
+    if settings.balance_color:
+        work = _enhance_balance_color(work)
+
+    if settings.denoise:
+        work = _enhance_denoise(work)
+
+    if settings.sharpen_subject:
+        work = _enhance_sharpen(work)
+
+    if settings.preserve_text:
+        work = _enhance_preserve_text(work)
+
+    return _recombine_alpha(work, alpha, original_mode)
+
+
+def export_image(
+    src: Path,
+    out_dir: Path,
+    fmt: str,
+    quality: int,
+    keep_exif: bool,
+    suffix: str,
+    scale: float,
+    enhancements: EnhancementSettings,
+) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pil_fmt, out_ext, is_jpeg = _resolve_output_fmt(fmt)
@@ -108,6 +264,12 @@ def export_image(src: Path, out_dir: Path, fmt: str, quality: int, keep_exif: bo
         else:
             # Fallback
             im_to_save = im
+
+        if scale and scale > 1.0:
+            im_to_save = _apply_upscale(im_to_save, scale)
+
+        if enhancements and enhancements.any_enabled():
+            im_to_save = apply_enhancements(im_to_save, enhancements)
 
         if keep_exif and "exif" in im.info:
             save_kwargs["exif"] = im.info["exif"]
@@ -144,11 +306,17 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         # Quality
         ttk.Label(top, text="Quality (JPG/JPEG/WEBP):").grid(row=0, column=2, sticky="w")
         self.quality_var = tk.IntVar(value=90)
-        self.quality_scale = ttk.Scale(top, from_=50, to=100, orient="horizontal", command=lambda v: self._update_quality_label())
-        self.quality_scale.set(self.quality_var.get())
-        self.quality_scale.grid(row=0, column=3, sticky="we", padx=(6, 6))
-        self.quality_label = ttk.Label(top, text="90")
+        self.quality_label = ttk.Label(top, text=str(self.quality_var.get()))
         self.quality_label.grid(row=0, column=4, sticky="w")
+        self.quality_scale = ttk.Scale(
+            top,
+            from_=50,
+            to=100,
+            orient="horizontal",
+            command=self._update_quality_label,
+        )
+        self.quality_scale.grid(row=0, column=3, sticky="we", padx=(6, 6))
+        self.quality_scale.set(self.quality_var.get())
 
         # Keep EXIF
         self.exif_var = tk.BooleanVar(value=True)
@@ -160,6 +328,18 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         self.suffix_var = tk.StringVar(value="_converted")
         self.suffix_entry = ttk.Entry(top, textvariable=self.suffix_var, width=18)
         self.suffix_entry.grid(row=1, column=4, sticky="w")
+
+        # Upscale selector
+        ttk.Label(top, text="Upscale:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.upscale_var = tk.StringVar(value=list(UPSCALE_OPTIONS.keys())[0])
+        self.upscale_cb = ttk.Combobox(
+            top,
+            textvariable=self.upscale_var,
+            values=list(UPSCALE_OPTIONS.keys()),
+            state="readonly",
+            width=18,
+        )
+        self.upscale_cb.grid(row=2, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(8, 0))
 
         # Output directory
         outf = ttk.Frame(self, padding=(10, 0, 10, 0))
@@ -215,6 +395,62 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(8, 8))
 
+        enhancements = ttk.LabelFrame(right, text="Enhancements", padding=(8, 6))
+        enhancements.pack(fill="x", pady=(0, 12))
+        self.autopilot_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Autopilot",
+            variable=self.autopilot_var,
+            command=lambda: self._on_autopilot_toggle(),
+        ).pack(anchor="w")
+        self.enhance_hint = ttk.Label(
+            enhancements,
+            text="Pick enhancements to run before export.",
+            wraplength=220,
+            justify="left",
+        )
+        self.enhance_hint.pack(fill="x", pady=(4, 6))
+
+        self.adjust_lighting_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Adjust lighting",
+            variable=self.adjust_lighting_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.balance_color_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Balance color",
+            variable=self.balance_color_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.sharpen_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Sharpen subject",
+            variable=self.sharpen_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.preserve_text_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Preserve text",
+            variable=self.preserve_text_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.denoise_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Denoise",
+            variable=self.denoise_var,
+        ).pack(anchor="w", padx=(18, 0), pady=(0, 2))
+
+        self._update_enhancement_hint()
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(4, 8))
+
         # Move area
         ttk.Label(right, text="2) Move converted files").pack(anchor="w")
         self.move_info = ttk.Label(right, text="Drop a folder onto the box below to MOVE the newly converted files there.\n(Or click 'Choose Folder…')", wraplength=240, justify="left")
@@ -244,11 +480,45 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
             self.move_drop.dnd_bind("<<Drop>>", self.on_drop_move_folder)
         else:
             self.status_var.set("Drag-and-drop not available (install tkinterdnd2). Use the 'Add Files…' and 'Choose…' buttons.")
-    
+
     # --- UI Actions ---
-    def _update_quality_label(self):
-        self.quality_var.set(int(float(self.quality_scale.get())))
-        self.quality_label.config(text=str(self.quality_var.get()))
+    def _update_enhancement_hint(self):
+        if getattr(self, "enhance_hint", None) is None:
+            return
+        if self.autopilot_var.get():
+            text = (
+                "Autopilot will gently tune lighting, color, and clarity. "
+                "Toggle extra steps below if you need them."
+            )
+        else:
+            text = "Pick individual enhancements to apply before exporting your images."
+        self.enhance_hint.config(text=text)
+
+    def _on_autopilot_toggle(self):
+        if self.autopilot_var.get():
+            for var in (
+                self.adjust_lighting_var,
+                self.balance_color_var,
+                self.sharpen_var,
+            ):
+                if not var.get():
+                    var.set(True)
+        self._update_enhancement_hint()
+
+    def _collect_enhancement_settings(self) -> EnhancementSettings:
+        return EnhancementSettings(
+            autopilot=bool(self.autopilot_var.get()),
+            adjust_lighting=bool(self.adjust_lighting_var.get()),
+            balance_color=bool(self.balance_color_var.get()),
+            sharpen_subject=bool(self.sharpen_var.get()),
+            preserve_text=bool(self.preserve_text_var.get()),
+            denoise=bool(self.denoise_var.get()),
+        )
+
+    def _update_quality_label(self, *_):
+        value = int(float(self.quality_scale.get()))
+        self.quality_var.set(value)
+        self.quality_label.config(text=str(value))
 
     def choose_output_dir(self):
         chosen = filedialog.askdirectory(title="Choose Output Folder")
@@ -367,6 +637,9 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         quality = int(self.quality_var.get())
         keep_exif = bool(self.exif_var.get())
         suffix = self.suffix_var.get().strip()
+        scale_label = self.upscale_var.get()
+        scale = UPSCALE_OPTIONS.get(scale_label, 1.0)
+        enhancements = self._collect_enhancement_settings()
 
         if fmt not in (f.upper() for f in OUTPUT_FORMATS):
             messagebox.showerror("Unsupported format", f"{fmt} is not supported.")
@@ -382,7 +655,16 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
             failures = 0
             for idx, src in enumerate(list(self.queue)):
                 try:
-                    out_path = export_image(src, out_dir, fmt, quality, keep_exif, suffix)
+                    out_path = export_image(
+                        src,
+                        out_dir,
+                        fmt,
+                        quality,
+                        keep_exif,
+                        suffix,
+                        scale,
+                        enhancements,
+                    )
                     self.converted_paths.append(out_path)
                     successes += 1
                 except Exception as e:
