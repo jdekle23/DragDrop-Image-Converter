@@ -15,6 +15,7 @@ Note: On some systems you may need the tkdnd DLL that comes with tkinterdnd2.
 import sys
 import threading
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
@@ -35,7 +36,7 @@ except Exception as e:
 
 # Imaging
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 except Exception as e:
     print("Pillow (PIL) is required. Install with: pip install pillow")
     sys.exit(1)
@@ -265,6 +266,62 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(8, 8))
 
+        enhancements = ttk.LabelFrame(right, text="Enhancements", padding=(8, 6))
+        enhancements.pack(fill="x", pady=(0, 12))
+        self.autopilot_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Autopilot",
+            variable=self.autopilot_var,
+            command=self._on_autopilot_toggle,
+        ).pack(anchor="w")
+        self.enhance_hint = ttk.Label(
+            enhancements,
+            text="Pick enhancements to run before export.",
+            wraplength=220,
+            justify="left",
+        )
+        self.enhance_hint.pack(fill="x", pady=(4, 6))
+
+        self.adjust_lighting_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Adjust lighting",
+            variable=self.adjust_lighting_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.balance_color_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Balance color",
+            variable=self.balance_color_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.sharpen_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Sharpen subject",
+            variable=self.sharpen_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.preserve_text_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Preserve text",
+            variable=self.preserve_text_var,
+        ).pack(anchor="w", padx=(18, 0))
+
+        self.denoise_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            enhancements,
+            text="Denoise",
+            variable=self.denoise_var,
+        ).pack(anchor="w", padx=(18, 0), pady=(0, 2))
+
+        self._update_enhancement_hint()
+
+        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(4, 8))
+
         # Move area
         ttk.Label(right, text="2) Move converted files").pack(anchor="w")
         self.move_info = ttk.Label(right, text="Drop a folder onto the box below to MOVE the newly converted files there.\n(Or click 'Choose Folder…')", wraplength=240, justify="left")
@@ -294,7 +351,7 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
             self.move_drop.dnd_bind("<<Drop>>", self.on_drop_move_folder)
         else:
             self.status_var.set("Drag-and-drop not available (install tkinterdnd2). Use the 'Add Files…' and 'Choose…' buttons.")
-    
+
     # --- UI Actions ---
     def _update_quality_label(self, *_):
         value = int(float(self.quality_scale.get()))
