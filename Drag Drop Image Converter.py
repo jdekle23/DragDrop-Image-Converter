@@ -140,6 +140,12 @@ def export_image(
             im_to_save = im
 
         if scale and scale > 1.0:
+            if im_to_save.mode == "P":
+                info = getattr(im_to_save, "info", {}) or {}
+                if "transparency" in info:
+                    im_to_save = im_to_save.convert("RGBA")
+                else:
+                    im_to_save = im_to_save.convert("RGB")
             im_to_save = _apply_upscale(im_to_save, scale)
 
         if keep_exif and "exif" in im.info:
