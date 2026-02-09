@@ -15,7 +15,6 @@ Note: On some systems you may need the tkdnd DLL that comes with tkinterdnd2.
 import sys
 import threading
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
@@ -36,7 +35,7 @@ except Exception as e:
 
 # Imaging
 try:
-    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    from PIL import Image
 except Exception as e:
     print("Pillow (PIL) is required. Install with: pip install pillow")
     sys.exit(1)
@@ -45,16 +44,6 @@ except Exception as e:
 SUPPORTED_INPUTS = {".webp", ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif", ".heic"}
 # Output choices (JPG is a user-facing alias for Pillow's JPEG encoder)
 OUTPUT_FORMATS = ["JPG", "JPEG", "PNG", "WEBP", "TIFF", "BMP"]
-
-# Upscale choices exposed in the UI. Map label -> scale factor (float multiplier).
-UPSCALE_OPTIONS = {
-    "No Upscale (100%)": 1.0,
-    "125% (1.25×)": 1.25,
-    "150% (1.5×)": 1.5,
-    "200% (2×)": 2.0,
-}
-
-_RESAMPLE_LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 
 def is_image_file(p: Path) -> bool:
     return p.suffix.lower() in SUPPORTED_INPUTS and p.is_file()
@@ -87,26 +76,7 @@ def _resolve_output_fmt(fmt: str):
         return ("JPEG", "jpeg", True)
     return (f, f.lower(), False)
 
-def _apply_upscale(im: Image.Image, scale: float) -> Image.Image:
-    """Return an upscaled copy of *im* when scale > 1. Uses high-quality Lanczos."""
-    if scale <= 1.0:
-        return im
-    w, h = im.size
-    new_size = (int(round(w * scale)), int(round(h * scale)))
-    if new_size == im.size:
-        return im
-    return im.resize(new_size, _RESAMPLE_LANCZOS)
-
-
-def export_image(
-    src: Path,
-    out_dir: Path,
-    fmt: str,
-    quality: int,
-    keep_exif: bool,
-    suffix: str,
-    scale: float,
-) -> Path:
+def export_image(src: Path, out_dir: Path, fmt: str, quality: int, keep_exif: bool, suffix: str) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pil_fmt, out_ext, is_jpeg = _resolve_output_fmt(fmt)
@@ -138,9 +108,6 @@ def export_image(
         else:
             # Fallback
             im_to_save = im
-
-        if scale and scale > 1.0:
-            im_to_save = _apply_upscale(im_to_save, scale)
 
         if keep_exif and "exif" in im.info:
             save_kwargs["exif"] = im.info["exif"]
@@ -177,17 +144,11 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         # Quality
         ttk.Label(top, text="Quality (JPG/JPEG/WEBP):").grid(row=0, column=2, sticky="w")
         self.quality_var = tk.IntVar(value=90)
-        self.quality_label = ttk.Label(top, text=str(self.quality_var.get()))
-        self.quality_label.grid(row=0, column=4, sticky="w")
-        self.quality_scale = ttk.Scale(
-            top,
-            from_=50,
-            to=100,
-            orient="horizontal",
-            command=self._update_quality_label,
-        )
-        self.quality_scale.grid(row=0, column=3, sticky="we", padx=(6, 6))
+        self.quality_scale = ttk.Scale(top, from_=50, to=100, orient="horizontal", command=lambda v: self._update_quality_label())
         self.quality_scale.set(self.quality_var.get())
+        self.quality_scale.grid(row=0, column=3, sticky="we", padx=(6, 6))
+        self.quality_label = ttk.Label(top, text="90")
+        self.quality_label.grid(row=0, column=4, sticky="w")
 
         # Keep EXIF
         self.exif_var = tk.BooleanVar(value=True)
@@ -199,18 +160,6 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         self.suffix_var = tk.StringVar(value="_converted")
         self.suffix_entry = ttk.Entry(top, textvariable=self.suffix_var, width=18)
         self.suffix_entry.grid(row=1, column=4, sticky="w")
-
-        # Upscale selector
-        ttk.Label(top, text="Upscale:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.upscale_var = tk.StringVar(value=list(UPSCALE_OPTIONS.keys())[0])
-        self.upscale_cb = ttk.Combobox(
-            top,
-            textvariable=self.upscale_var,
-            values=list(UPSCALE_OPTIONS.keys()),
-            state="readonly",
-            width=18,
-        )
-        self.upscale_cb.grid(row=2, column=1, columnspan=2, sticky="w", padx=(6, 0), pady=(8, 0))
 
         # Output directory
         outf = ttk.Frame(self, padding=(10, 0, 10, 0))
@@ -266,62 +215,6 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
 
         ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(8, 8))
 
-        enhancements = ttk.LabelFrame(right, text="Enhancements", padding=(8, 6))
-        enhancements.pack(fill="x", pady=(0, 12))
-        self.autopilot_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Autopilot",
-            variable=self.autopilot_var,
-            command=self._on_autopilot_toggle,
-        ).pack(anchor="w")
-        self.enhance_hint = ttk.Label(
-            enhancements,
-            text="Pick enhancements to run before export.",
-            wraplength=220,
-            justify="left",
-        )
-        self.enhance_hint.pack(fill="x", pady=(4, 6))
-
-        self.adjust_lighting_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Adjust lighting",
-            variable=self.adjust_lighting_var,
-        ).pack(anchor="w", padx=(18, 0))
-
-        self.balance_color_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Balance color",
-            variable=self.balance_color_var,
-        ).pack(anchor="w", padx=(18, 0))
-
-        self.sharpen_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Sharpen subject",
-            variable=self.sharpen_var,
-        ).pack(anchor="w", padx=(18, 0))
-
-        self.preserve_text_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Preserve text",
-            variable=self.preserve_text_var,
-        ).pack(anchor="w", padx=(18, 0))
-
-        self.denoise_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            enhancements,
-            text="Denoise",
-            variable=self.denoise_var,
-        ).pack(anchor="w", padx=(18, 0), pady=(0, 2))
-
-        self._update_enhancement_hint()
-
-        ttk.Separator(right, orient="horizontal").pack(fill="x", pady=(4, 8))
-
         # Move area
         ttk.Label(right, text="2) Move converted files").pack(anchor="w")
         self.move_info = ttk.Label(right, text="Drop a folder onto the box below to MOVE the newly converted files there.\n(Or click 'Choose Folder…')", wraplength=240, justify="left")
@@ -351,12 +244,11 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
             self.move_drop.dnd_bind("<<Drop>>", self.on_drop_move_folder)
         else:
             self.status_var.set("Drag-and-drop not available (install tkinterdnd2). Use the 'Add Files…' and 'Choose…' buttons.")
-
+    
     # --- UI Actions ---
-    def _update_quality_label(self, *_):
-        value = int(float(self.quality_scale.get()))
-        self.quality_var.set(value)
-        self.quality_label.config(text=str(value))
+    def _update_quality_label(self):
+        self.quality_var.set(int(float(self.quality_scale.get())))
+        self.quality_label.config(text=str(self.quality_var.get()))
 
     def choose_output_dir(self):
         chosen = filedialog.askdirectory(title="Choose Output Folder")
@@ -475,8 +367,6 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
         quality = int(self.quality_var.get())
         keep_exif = bool(self.exif_var.get())
         suffix = self.suffix_var.get().strip()
-        scale_label = self.upscale_var.get()
-        scale = UPSCALE_OPTIONS.get(scale_label, 1.0)
 
         if fmt not in (f.upper() for f in OUTPUT_FORMATS):
             messagebox.showerror("Unsupported format", f"{fmt} is not supported.")
@@ -492,7 +382,7 @@ class App(TkinterDnD.Tk if TkinterDnD else tk.Tk):
             failures = 0
             for idx, src in enumerate(list(self.queue)):
                 try:
-                    out_path = export_image(src, out_dir, fmt, quality, keep_exif, suffix, scale)
+                    out_path = export_image(src, out_dir, fmt, quality, keep_exif, suffix)
                     self.converted_paths.append(out_path)
                     successes += 1
                 except Exception as e:
